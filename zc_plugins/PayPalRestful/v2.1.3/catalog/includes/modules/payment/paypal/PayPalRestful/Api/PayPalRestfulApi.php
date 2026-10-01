@@ -427,8 +427,8 @@ class PayPalRestfulApi extends ErrorInfo
             $parameters = ['op' => 'replace', 'path' => '/status', 'value' => 'CANCELLED'];
             // $this->log->write("==> Sending tracking update: $paypal_txnid, " . Logger::logJSON($parameters) . ")\n", true);
             $response = $this->curlPatch("v2/checkout/orders/$paypal_txnid/trackers/$tracker_id", [$parameters]);
-            if ($response === null) {
-                $response = ['success'];
+            if ($response === []) {
+                $response = ['success'];   // a 204 reports success without a body
             }
         }
         $this->log->write("==> End updatePackageTracking", true);
@@ -953,9 +953,11 @@ class PayPalRestfulApi extends ErrorInfo
     {
         // -----
         // Decode the PayPal response into an associative array, retrieve the httpCode associated
-        // with the response and 'reset' the errorInfo property.
+        // with the response and 'reset' the errorInfo property.  The undecoded body is kept so
+        // that an empty one can be told apart from one that simply would not decode.
         //
-        $response = json_decode($response, true);
+        $raw_response = (string)$response;
+        $response = json_decode($raw_response, true);
         $httpCode = curl_getinfo($this->ch, CURLINFO_HTTP_CODE);
         $this->setErrorInfo($httpCode, '', 0, []);
 
@@ -964,9 +966,33 @@ class PayPalRestfulApi extends ErrorInfo
         //
         // 200: Request succeeded
         // 201: A POST method successfully created a resource.
-        // 204: No content returned; implies successful completion of an updateOrder request.
+        // 204: No content returned; implies successful completion of an updateOrder,
+        //      tracking-update or webhook-removal request.
         //
         if ($httpCode === 200 || $httpCode === 201 || $httpCode === 204) {
+            /**
+             * A 204 carries no body at all, and json_decode of an empty string yields
+             * null rather than an array.  Report the success as an empty array so that
+             * callers can still tell it apart from the false returned on error.
+             */
+            if (trim($raw_response) === '') {
+                $this->log->write("The $method ($option) request was successful ($httpCode), with no content returned.");
+                return [];
+            }
+
+            /**
+             * A success status carrying a body that will not decode is not something
+             * that can be acted on, so treat it as an interface error rather than
+             * handing the caller a null.
+             */
+            if (!is_array($response)) {
+                $errMsg = "An undecodable body was returned from PayPal with status $httpCode.";
+                trigger_error($errMsg, E_USER_WARNING);
+                $this->setErrorInfo($httpCode, $errMsg, 0, []);
+                $this->log->write("The $method ($option) request returned $httpCode with a body that could not be decoded.\n" . $raw_response);
+                return false;
+            }
+
             $this->log->write("The $method ($option) request was successful ($httpCode).\n" . Logger::logJSON($response, $this->keepTxnLinks));
             return $response;
         }
